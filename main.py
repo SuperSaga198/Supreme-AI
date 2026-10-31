@@ -38,25 +38,16 @@ class SupremeRequest(BaseModel):
 
 tensorrt_engine_instance = None
 groq_client = None
+engine_loading_status = "uninitialized"  # Tracks background loading state
 
-@app.on_event("startup")
-async def initialize_system_channels():
-    global tensorrt_engine_instance, groq_client
-    
-    if GROQ_AVAILABLE:
-        api_key = os.getenv("GROQ_API_KEY")
-        if api_key:
-            groq_client = AsyncGroq(api_key=api_key)
-            print("[INFO] Groq Channel successfully initialized.")
-        else:
-            print("[WARNING] GROQ_API_KEY not found in environment variables.")
-    else:
-        print("[WARNING] groq package missing. Standard channel unavailable.")
-
-    if VLLM_AVAILABLE:
-        engine_path = "./supreme-compiled-engine"
-        if os.path.exists(engine_path):
-            print(f"[INFO] Compiling and loading TensorRT engine from {engine_path}...")
+# Helper function to load the heavy vLLM engine in the background
+def load_vllm_engine_background():
+    global tensorrt_engine_instance, engine_loading_status
+    engine_path = "./supreme-compiled-engine"
+    if os.path.exists(engine_path):
+        try:
+            print(f"[INFO] Asynchronously compiling and loading TensorRT engine from {engine_path}...")
+            engine_loading_status = "loading"
             engine_args = EngineArgs(
                 model=engine_path,
                 tensor_parallel_size=2,       
@@ -65,15 +56,41 @@ async def initialize_system_channels():
                 enforce_eager=True            
             )
             tensorrt_engine_instance = LLMEngine.from_engine_args(engine_args)
+            engine_loading_status = "ready"
             print("[INFO] Advanced TensorRT-LLM Core successfully initialized.")
+        except Exception as e:
+            engine_loading_status = f"failed: {str(e)}"
+            print(f"[ERROR] Failed to load TensorRT Engine: {str(e)}")
+    else:
+        engine_loading_status = "missing_directory"
+        print(f"[WARNING] TensorRT engine directory not found at {engine_path}.")
+
+@app.on_event("startup")
+async def initialize_system_channels():
+    global groq_client
+    
+    # 1. Initialize Groq Channel immediately (Non-blocking)
+    if GROQ_AVAILABLE:
+        api_key = os.getenv("GROQ_API_KEY")
+        if api_key:
+            groq_client = AsyncGroq(api_key=api_key)
+            print("[INFO] Groq Channel successfully initialized.")
         else:
-            print(f"[WARNING] TensorRT engine directory not found at {engine_path}. Advanced channel will fail if invoked.")
+            print("[WARNING] GROQ_API_KEY not found in environment variables.")
+    else:
+        print("[WARNING] groq package missing.")
+
+    # 2. Kick off the heavy vLLM engine loading as a background task
+    if VLLM_AVAILABLE:
+        # loop.run_in_executor offloads blocking code so FastAPI can open its port instantly!
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, load_vllm_engine_background)
     else:
         print("[WARNING] vllm package missing. Advanced channel unavailable.")
 
 async def stream_tensorrt_engine(prompt: str, max_tokens: int, temperature: float) -> AsyncGenerator[str, None]:
     if not VLLM_AVAILABLE or not tensorrt_engine_instance:
-        yield "[System Error]: TensorRT core engine uninitialized."
+        yield f"[System Error]: TensorRT core engine uninitialized. Status: {engine_loading_status}"
         return
         
     request_id = random_uuid()
@@ -109,11 +126,11 @@ async def stream_groq_api(prompt: str, max_tokens: int, temperature: float) -> A
 @app.post("/v1/supreme/chat")
 async def process_hybrid_route(request: SupremeRequest):
     if request.mode == "advanced":
+        if engine_loading_status == "loading":
+            raise HTTPException(status_code=503, detail="TensorRT engine is still booting up in the background. Please retry in a moment.")
         if not tensorrt_engine_instance:
-            raise HTTPException(
-                status_code=503, 
-                detail="Advanced TensorRT Core engine is not loaded or configured on this serverless instance."
-            )
+            raise HTTPException(status_code=503, detail=f"Advanced engine unavailable. Status: {engine_loading_status}")
+            
         structured_prompt = f"<system>Initialize advanced structural cognitive mode.</system>\n{request.prompt}"
         return StreamingResponse(
             stream_tensorrt_engine(structured_prompt, request.max_tokens, request.temperature),
@@ -129,7 +146,7 @@ async def process_hybrid_route(request: SupremeRequest):
                 )
             raise HTTPException(
                 status_code=503, 
-                detail="Groq API client is uninitialized. Verify your GROQ_API_KEY environment variables."
+                detail=f"Groq API client uninitialized and local core state is: {engine_loading_status}"
             )
         return StreamingResponse(
             stream_groq_api(request.prompt, request.max_tokens, request.temperature),
@@ -141,11 +158,10 @@ async def health_check():
     return {
         "status": "active",
         "groq_channel": groq_client is not None,
-        "tensorrt_channel": tensorrt_engine_instance is not None
+        "tensorrt_channel_status": engine_loading_status
     }
 
 if __name__ == "__main__":
     import uvicorn
-    # Use os.environ.get safely to fallback to port 10000 on Render
     server_port = int(os.environ.get("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=server_port, log_level="info")
