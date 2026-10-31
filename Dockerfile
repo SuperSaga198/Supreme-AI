@@ -17,5 +17,11 @@ EXPOSE 10000
 ENV PYTHONUNBUFFERED=1
 ENV ENFORCE_EAGER=True
 
+# =================================================================
+# CRITICAL FIX: Reset the base image entrypoint override
+# =================================================================
+# This stops vLLM from hijacking the startup sequence and forcing port 8000.
+ENTRYPOINT []
+
 # Execute the native script application loop directly down the wire
 CMD ["python", "main.py"]
