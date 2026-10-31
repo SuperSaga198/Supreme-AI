@@ -7,7 +7,6 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Try importing serverless MLOps dependencies safely
 try:
     from vllm import LLMEngine, EngineArgs, SamplingParams
     from vllm.utils import random_uuid
@@ -21,10 +20,8 @@ try:
 except ImportError:
     GROQ_AVAILABLE = False
 
-# Initialize FastAPI Application
 app = FastAPI(title="Supreme AI Hybrid Routing Engine", version="2.0.0")
 
-# Enable CORS for frontend interface communication
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,23 +30,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define API Request Schema
 class SupremeRequest(BaseModel):
     prompt: str
-    mode: str = "standard"  # options: "standard" (Groq) or "advanced" (TensorRT-LLM)
+    mode: str = "standard"  
     max_tokens: int = 1024
     temperature: float = 0.7
 
-# Global engine placeholders for the serverless container lifecycle
 tensorrt_engine_instance = None
 groq_client = None
 
 @app.on_event("startup")
 async def initialize_system_channels():
-    """Triggered once when the serverless container spins up."""
     global tensorrt_engine_instance, groq_client
     
-    # 1. Initialize Groq Channel (Standard Mode)
     if GROQ_AVAILABLE:
         api_key = os.getenv("GROQ_API_KEY")
         if api_key:
@@ -60,7 +53,6 @@ async def initialize_system_channels():
     else:
         print("[WARNING] groq package missing. Standard channel unavailable.")
 
-    # 2. Initialize vLLM + TensorRT-LLM Channel (Advanced Mode)
     if VLLM_AVAILABLE:
         engine_path = "./supreme-compiled-engine"
         if os.path.exists(engine_path):
@@ -79,12 +71,7 @@ async def initialize_system_channels():
     else:
         print("[WARNING] vllm package missing. Advanced channel unavailable.")
 
-
-# ==========================================
-# CHANNEL A: PRIVATE TENSORRT-LLM INFERENCE
-# ==========================================
 async def stream_tensorrt_engine(prompt: str, max_tokens: int, temperature: float) -> AsyncGenerator[str, None]:
-    """Streams data dynamically from the local multi-GPU compiled architecture."""
     if not VLLM_AVAILABLE or not tensorrt_engine_instance:
         yield "[System Error]: TensorRT core engine uninitialized."
         return
@@ -103,12 +90,7 @@ async def stream_tensorrt_engine(prompt: str, max_tokens: int, temperature: floa
             yield request_output.outputs[-1].text
         await asyncio.sleep(0)
 
-
-# ==========================================
-# CHANNEL B: GROQ CLOUD CLOUD INFERENCE
-# ==========================================
 async def stream_groq_api(prompt: str, max_tokens: int, temperature: float) -> AsyncGenerator[str, None]:
-    """Streams data instantly from the cloud hardware using the Llama brain configuration."""
     try:
         completion = await groq_client.chat.completions.create(
             model="llama3-70b-8192",  
@@ -124,13 +106,8 @@ async def stream_groq_api(prompt: str, max_tokens: int, temperature: float) -> A
     except Exception as e:
         yield f"\n[Groq Channel Error]: {str(e)}"
 
-
-# ==========================================
-# CORE HYBRID DUAL-MODE ROUTER
-# ==========================================
 @app.post("/v1/supreme/chat")
 async def process_hybrid_route(request: SupremeRequest):
-    """Dynamically channels incoming workflow streams based on specific operational constraints."""
     if request.mode == "advanced":
         if not tensorrt_engine_instance:
             raise HTTPException(
@@ -159,7 +136,6 @@ async def process_hybrid_route(request: SupremeRequest):
             media_type="text/event-stream"
         )
 
-# Health check validation path for serverless load balancers
 @app.get("/health")
 async def health_check():
     return {
@@ -168,12 +144,8 @@ async def health_check():
         "tensorrt_channel": tensorrt_engine_instance is not None
     }
 
-# ==========================================
-# CRUCIAL NATIVE PYTHON PORT BINDING LOOP
-# ==========================================
 if __name__ == "__main__":
     import uvicorn
-    # Pulls Render's dynamic host port configuration ($PORT environment value)
-    server_port = int(os.getenv("PORT", 10000))
-    # Binds directly to 0.0.0.0 to clear Render's traffic scan engine probes
+    # Use os.environ.get safely to fallback to port 10000 on Render
+    server_port = int(os.environ.get("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=server_port, log_level="info")
